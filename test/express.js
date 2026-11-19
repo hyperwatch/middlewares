@@ -12,6 +12,10 @@ describe('with Express', () => {
     const app = express();
     app.use(serviceLimiter({ getIdentity: (req) => req.get('x-identity') }));
     app.use(duplicateHandler());
+    app.get('/cookie', (req, res) => {
+      calls++;
+      setTimeout(() => res.cookie('session', String(calls)).send('ok'), 100);
+    });
     app.get('/page', (req, res) => {
       calls++;
       setTimeout(() => res.status(201).type('html').send('<b>hi</b>'), 100);
@@ -36,6 +40,21 @@ describe('with Express', () => {
       [201, 'text/html; charset=utf-8', '<b>hi</b>'],
       [201, 'text/html; charset=utf-8', '<b>hi</b>'],
       [201, 'text/html; charset=utf-8', '<b>hi</b>'],
+    ]);
+  });
+
+  it('does not share res.cookie', async () => {
+    calls = 0;
+    const cookies = await Promise.all(
+      [1, 2].map(async () => {
+        const res = await fetch(url.replace('/page', '/cookie'));
+        return res.headers.get('set-cookie');
+      })
+    );
+    assert.strictEqual(calls, 2);
+    assert.deepStrictEqual(cookies.sort(), [
+      'session=1; Path=/',
+      'session=2; Path=/',
     ]);
   });
 

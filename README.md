@@ -27,7 +27,7 @@ app.use(
 | `key`     | method and URL | `(req) => string`, requests with the same key are duplicates |
 | `timeout` | `30`           | Seconds after which a pending request is forgotten           |
 
-A request only joins one whose response hasn't started yet; otherwise it is processed on its own.
+A request is processed on its own when the response it would join has already started, or sets a cookie: such a response was made for one client. If the cookie only appears once requests are waiting, they are all processed on their own. Requests that carry credentials (cookies, `Authorization`) should still be skipped: their responses can depend on who asks without setting a cookie.
 
 ## Service limiter
 
