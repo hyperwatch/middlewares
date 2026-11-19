@@ -1,4 +1,5 @@
 const assert = require('node:assert');
+const http = require('node:http');
 const { setTimeout: sleep } = require('node:timers/promises');
 
 const { duplicateHandler } = require('../src');
@@ -247,5 +248,106 @@ describe('duplicateHandler', () => {
       );
       assert.strictEqual(calls, 1);
     });
+  });
+
+  describe('Vary', () => {
+    // Answers in the language asked, after a while
+    const languageHandler = (setVary) => async (req, res) => {
+      calls++;
+      await sleep(100);
+      setVary(res);
+      res.end(`page in ${req.headers['accept-language'] ?? 'en'}`);
+    };
+
+    const fetchLanguages = (languages) =>
+      Promise.all(
+        languages.map((language) =>
+          get(`${app.url}/a`, {
+            headers: language ? { 'accept-language': language } : {},
+          }).then((res) => res.body)
+        )
+      );
+
+    it('shares only with requests having the same varied headers', async () => {
+      app = await listen(
+        [duplicateHandler()],
+        languageHandler((res) => res.setHeader('Vary', 'Host, Accept-Language'))
+      );
+      const bodies = await fetchLanguages(['fr', 'fr', 'de', undefined]);
+      assert.deepStrictEqual(bodies, [
+        'page in fr',
+        'page in fr',
+        'page in de',
+        'page in *', // fetch's default Accept-Language
+      ]);
+      assert.strictEqual(calls, 3);
+    });
+
+    it('tells a missing header from an empty one', async () => {
+      app = await listen([duplicateHandler()], async (req, res) => {
+        calls++;
+        await sleep(100);
+        res.setHeader('Vary', 'X-Mode');
+        res.end(Object.hasOwn(req.headers, 'x-mode') ? 'present' : 'absent');
+      });
+      const bodies = await Promise.all([
+        get(`${app.url}/a`).then((res) => res.body),
+        get(`${app.url}/a`, { headers: { 'x-mode': '' } }).then(
+          (res) => res.body
+        ),
+      ]);
+      assert.deepStrictEqual(bodies, ['absent', 'present']);
+      assert.strictEqual(calls, 2);
+    });
+
+    it('reads Vary given to writeHead', async () => {
+      app = await listen(
+        [duplicateHandler()],
+        languageHandler((res) =>
+          res.writeHead(200, ['Vary', 'Accept-Language'])
+        )
+      );
+      assert.deepStrictEqual(await fetchLanguages(['fr', 'de']), [
+        'page in fr',
+        'page in de',
+      ]);
+    });
+
+    it('shares nothing with Vary: *', async () => {
+      app = await listen(
+        [duplicateHandler()],
+        languageHandler((res) => res.setHeader('Vary', '*'))
+      );
+      await fetchLanguages(['fr', 'fr']);
+      assert.strictEqual(calls, 2);
+    });
+
+    it('ignores Vary: Accept-Encoding', async () => {
+      app = await listen(
+        [duplicateHandler()],
+        languageHandler((res) => res.setHeader('Vary', 'Accept-Encoding'))
+      );
+      assert.deepStrictEqual(await fetchLanguages(['fr', 'de']), [
+        'page in fr',
+        'page in fr',
+      ]);
+      assert.strictEqual(calls, 1);
+    });
+  });
+
+  it('processes different hosts separately', async () => {
+    app = await listen([duplicateHandler()], slowHandler);
+    // fetch doesn't let the Host header be changed
+    const request = (host) =>
+      new Promise((resolve) => {
+        http
+          .get(`${app.url}/a`, { headers: { host } }, (res) => {
+            res.resume();
+            res.on('end', resolve);
+          })
+          .end();
+      });
+    await Promise.all([request('a.example'), request('b.example')]);
+    assert.strictEqual(calls, 2);
   });
 });
