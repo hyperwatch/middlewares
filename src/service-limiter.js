@@ -202,15 +202,16 @@ function serviceLimiter({
     Math.min(warmUpLevel, currentManual()?.level ?? Infinity);
 
   /**
-   * The level from which an identity is served (0 for essential ones).
+   * The level from which a request is served. Requests without an identity
+   * and essential identities are served at any level, even a negative one.
    *
-   * @param {string} identity
+   * @param {string | undefined} identity
    */
   const levelServing = (identity) => {
-    if (nonEssential.has(identity)) {
-      return NON_ESSENTIAL_LEVEL;
+    if (!identity || essential.has(identity)) {
+      return -Infinity;
     }
-    return essential.has(identity) ? 0 : IDENTIFIED_LEVEL;
+    return nonEssential.has(identity) ? NON_ESSENTIAL_LEVEL : IDENTIFIED_LEVEL;
   };
 
   /**
@@ -265,7 +266,7 @@ function serviceLimiter({
     }
     // The level may have changed while the identity was resolved
     const level = getServiceLevel();
-    const needed = identity ? levelServing(identity) : 0;
+    const needed = levelServing(identity);
     if (level < needed) {
       debug(`Service limited for '${identity}' at level ${level}`);
       onLimited(req, res, limitedFor(needed));

@@ -82,6 +82,16 @@ describe('serviceLimiter', () => {
     assert.strictEqual(res.body, 'Service Limited. Try again later.');
   });
 
+  it('never limits unidentified requests and essential identities, even below 0', async () => {
+    const limiter = await start({ initialLevel: -10 });
+    assert.strictEqual(await statusFor(), 200);
+    assert.strictEqual(await statusFor('Facebook'), 200);
+    await limiter.setServiceLevel(-50);
+    assert.strictEqual(await statusFor(), 200);
+    assert.strictEqual(await statusFor('Facebook'), 200);
+    assert.strictEqual(await statusFor('Googlebot'), 503);
+  });
+
   describe('Retry-After', () => {
     const retryAfterFor = async (identity) => {
       const res = await get(app.url, { headers: { 'x-identity': identity } });
