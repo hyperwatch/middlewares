@@ -144,12 +144,26 @@ function serviceLimiter({
   /** @type {ManualLevel | null} As last read from the store */
   let manual = null;
 
-  const refresh = async () => {
-    try {
-      manual = (await store.get()) ?? null;
-    } catch (err) {
-      debug(`Reading the manual level failed, keeping the last one: ${err}`);
-    }
+  // Counts the writes: a read started before one is stale
+  let writes = 0;
+  /** @type {Promise<void> | null} The read in progress, one at a time */
+  let reading = null;
+
+  const refresh = () => {
+    reading ??= (async () => {
+      const before = writes;
+      try {
+        const value = (await store.get()) ?? null;
+        if (writes === before) {
+          manual = value;
+        }
+      } catch (err) {
+        debug(`Reading the manual level failed, keeping the last one: ${err}`);
+      } finally {
+        reading = null;
+      }
+    })();
+    return reading;
   };
   refresh();
   setInterval(refresh, refreshInterval * 1000).unref();
@@ -211,8 +225,7 @@ function serviceLimiter({
    * @param {Next} next
    */
   const middleware = async (req, res, next) => {
-    const level = getServiceLevel();
-    if (level >= NON_ESSENTIAL_LEVEL) {
+    if (getServiceLevel() >= NON_ESSENTIAL_LEVEL) {
       next();
       return;
     }
@@ -223,6 +236,8 @@ function serviceLimiter({
       next(err);
       return;
     }
+    // The level may have changed while the identity was resolved
+    const level = getServiceLevel();
     const needed = identity ? levelServing(identity) : 0;
     if (level < needed) {
       debug(`Service limited for '${identity}' at level ${level}`);
@@ -256,11 +271,13 @@ function serviceLimiter({
       }
       debug(`Setting the manual level to ${level}`);
       await store.set(value);
+      writes++;
       manual = value;
     },
     async clearServiceLevel() {
       debug('Clearing the manual level');
       await store.set(null);
+      writes++;
       manual = null;
     },
     getServiceLevel,

@@ -215,4 +215,54 @@ describe('serviceLimiter', () => {
       assert.strictEqual(limiter.getServiceLevel(), 40);
     });
   });
+
+  describe('races', () => {
+    it('a read started before a write does not overwrite it', async () => {
+      let shared = null;
+      const store = {
+        // Slow: returns what the store held when the read started
+        get: async () => {
+          const value = shared;
+          await sleep(100);
+          return value;
+        },
+        set: async (value) => {
+          shared = value;
+        },
+      };
+      // Its first read starts at creation, with nothing stored
+      const limiter = await start({ initialLevel: 100, store });
+      await limiter.setServiceLevel(40);
+      await sleep(150);
+      assert.strictEqual(limiter.getServiceLevel(), 40);
+    });
+
+    it('decides with the level once the identity is known', async () => {
+      const limiter = await start({
+        getIdentity: async (req) => {
+          await sleep(100);
+          return req.headers['x-identity'];
+        },
+      });
+      const status = statusFor('Googlebot');
+      await sleep(20);
+      limiter.increaseServiceLevel(50);
+      assert.strictEqual(await status, 200);
+    });
+
+    it('applies a manual level set while the identity is resolved', async () => {
+      // Below 100: the identity is needed (at 100, requests pass at once)
+      const limiter = await start({
+        initialLevel: 60,
+        getIdentity: async (req) => {
+          await sleep(100);
+          return req.headers['x-identity'];
+        },
+      });
+      const status = statusFor('Googlebot');
+      await sleep(20);
+      await limiter.setServiceLevel(40);
+      assert.strictEqual(await status, 503);
+    });
+  });
 });
