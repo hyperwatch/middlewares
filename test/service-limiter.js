@@ -240,6 +240,47 @@ describe('serviceLimiter', () => {
       assert.ok(Date.now() - started < 1500);
     });
 
+    it('reads again after a read that hangs', async () => {
+      let hang = true;
+      const store = {
+        get: () =>
+          hang ? new Promise(() => {}) : Promise.resolve({ level: 40 }),
+        set: async () => {},
+      };
+      const limiter = await start({
+        initialLevel: 100,
+        store,
+        refreshInterval: 0.05,
+      });
+      hang = false;
+      await sleep(200);
+      assert.strictEqual(limiter.getServiceLevel(), 40);
+    });
+
+    it('drops the late result of an abandoned read', async () => {
+      const answers = [];
+      const store = {
+        // Each read waits for its answer
+        get: () => new Promise((resolve) => answers.push(resolve)),
+        set: async () => {},
+      };
+      const limiter = await start({
+        initialLevel: 100,
+        store,
+        refreshInterval: 0.05,
+      });
+      // The first read is given up, a second one starts
+      for (let i = 0; i < 100 && answers.length < 2; i++) {
+        await sleep(5);
+      }
+      assert.strictEqual(answers.length, 2, 'no second read');
+      answers[1]({ level: 40 });
+      await sleep(10);
+      answers[0]({ level: 30 });
+      await sleep(10);
+      assert.strictEqual(limiter.getServiceLevel(), 40);
+    });
+
     it('a new warm-up schedule replaces the previous one', async () => {
       const limiter = await start();
       limiter.warmUp([{ after: 0.05, level: 100 }]);

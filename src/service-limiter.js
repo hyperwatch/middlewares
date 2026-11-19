@@ -149,25 +149,36 @@ function serviceLimiter({
   /** @type {ManualLevel | null} As last read from the store */
   let manual = null;
 
-  // Counts the writes: a read started before one is stale
+  // Counts the writes and the reads: the result of a read is dropped when a
+  // write or a newer read started after it
   let writes = 0;
+  let reads = 0;
   /** @type {Promise<void> | null} The read in progress, one at a time */
   let reading = null;
 
   const refresh = () => {
-    reading ??= (async () => {
-      const before = writes;
-      try {
-        const value = (await store.get()) ?? null;
-        if (writes === before) {
-          manual = value;
+    if (reading) {
+      return reading;
+    }
+    const read = ++reads;
+    const before = writes;
+    const result = store.get().then(
+      (value) => {
+        if (read === reads && writes === before) {
+          manual = value ?? null;
         }
-      } catch (err) {
+      },
+      (err) => {
         debug(`Reading the manual level failed, keeping the last one: ${err}`);
-      } finally {
-        reading = null;
       }
-    })();
+    );
+    // A read that hangs doesn't block the next ones
+    const giveUp = new Promise((resolve) => {
+      setTimeout(resolve, refreshInterval * 1000).unref();
+    });
+    reading = Promise.race([result, giveUp]).then(() => {
+      reading = null;
+    });
     return reading;
   };
   // Requests wait for the first read, a manual level may already be set,
