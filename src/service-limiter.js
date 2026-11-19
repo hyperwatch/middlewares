@@ -1,3 +1,5 @@
+const { inspect } = require('node:util');
+
 const debug = require('debug')('hyperwatch:service-limiter');
 
 /**
@@ -118,6 +120,15 @@ async function defaultIdentify(req) {
   }
   return { identity: req.identity };
 }
+
+/**
+ * What was thrown, as an Error: anything can be thrown or rejected with.
+ *
+ * @param {unknown} thrown
+ * @returns {Error}
+ */
+const toError = (thrown) =>
+  thrown instanceof Error ? thrown : new Error(inspect(thrown));
 
 /**
  * @param {unknown} priorities
@@ -254,7 +265,7 @@ function serviceLimiter({
         throw new TypeError(`identify returned ${typeof robot}, not an object`);
       }
     } catch (error) {
-      return { kind: 'identify', error: /** @type {Error} */ (error) };
+      return { kind: 'identify', error: toError(error) };
     }
     const { identity, category } = robot ?? {};
     // Everything may be served by now
@@ -265,7 +276,7 @@ function serviceLimiter({
     try {
       priority = await classifyRequest({ identity, category, req });
     } catch (error) {
-      return { kind: 'classify', error: /** @type {Error} */ (error) };
+      return { kind: 'classify', error: toError(error) };
     }
     if (priority === undefined || priority === null) {
       return { identity, category };
@@ -275,7 +286,7 @@ function serviceLimiter({
       return {
         kind: 'priority',
         error: new TypeError(
-          `classify returned ${JSON.stringify(priority) ?? String(priority)}, not one of ${priorities.join(', ')}`
+          `classify returned ${inspect(priority)}, not one of ${priorities.join(', ')}`
         ),
       };
     }
@@ -300,9 +311,18 @@ function serviceLimiter({
         });
       }, timeoutMs).unref();
     });
-    return Promise.race([prioritize(req), expired]).finally(() => {
-      clearTimeout(timer);
-    });
+    return Promise.race([prioritize(req), expired])
+      .catch(
+        // Not expected: prioritize returns its failures. Served all the same.
+        (error) =>
+          /** @type {Failure} */ ({
+            kind: 'classify',
+            error: toError(error),
+          })
+      )
+      .finally(() => {
+        clearTimeout(timer);
+      });
   };
 
   /**

@@ -385,6 +385,18 @@ describe('serviceLimiter', () => {
       );
     });
 
+    it('identify or classify rejects with something that is not an error', async () => {
+      for (const thrown of [undefined, null, 'no', 0]) {
+        for (const option of ['identify', 'classify']) {
+          const errors = await failing({
+            [option]: () => Promise.reject(thrown),
+          });
+          assert.strictEqual(errors.length, 1);
+          assert.strictEqual(errors[0][0], option);
+        }
+      }
+    });
+
     it('identify returns something else than an object', async () => {
       const errors = await failing({ identify: () => 'Googlebot' });
       assert.strictEqual(errors[0][0], 'identify');
@@ -411,7 +423,20 @@ describe('serviceLimiter', () => {
     });
 
     it('classify returns a name that is not a priority', async () => {
-      for (const value of ['hihg', '', 0, 1, false, {}, ['low']]) {
+      const circular = {};
+      circular.self = circular;
+      for (const value of [
+        'hihg',
+        '',
+        0,
+        1,
+        false,
+        {},
+        ['low'],
+        10n,
+        circular,
+        Symbol('low'),
+      ]) {
         const errors = await failing({ classify: () => value });
         assert.strictEqual(errors.length, 1, String(value));
         assert.strictEqual(errors[0][0], 'priority');
