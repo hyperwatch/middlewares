@@ -95,16 +95,20 @@ function varyHeaders(res, writeHeadArgs) {
 }
 
 /**
- * Whether two requests have the same values for the given headers.
+ * Whether two requests have the same values for the given headers. A missing
+ * header differs from an empty one.
  *
  * @param {Request} a
  * @param {Request} b
  * @param {string[]} names Lower case
  */
 const sameHeaders = (a, b, names) =>
-  names.every(
-    (name) => String(a.headers[name] ?? '') === String(b.headers[name] ?? '')
-  );
+  names.every((name) => {
+    const [valueA, valueB] = [a.headers[name], b.headers[name]];
+    return valueA === undefined || valueB === undefined
+      ? valueA === valueB
+      : String(valueA) === String(valueB);
+  });
 
 /**
  * Hands the origin response over to the duplicates when it starts: its

@@ -283,6 +283,23 @@ describe('duplicateHandler', () => {
       assert.strictEqual(calls, 3);
     });
 
+    it('tells a missing header from an empty one', async () => {
+      app = await listen([duplicateHandler()], async (req, res) => {
+        calls++;
+        await sleep(100);
+        res.setHeader('Vary', 'X-Mode');
+        res.end(Object.hasOwn(req.headers, 'x-mode') ? 'present' : 'absent');
+      });
+      const bodies = await Promise.all([
+        get(`${app.url}/a`).then((res) => res.body),
+        get(`${app.url}/a`, { headers: { 'x-mode': '' } }).then(
+          (res) => res.body
+        ),
+      ]);
+      assert.deepStrictEqual(bodies, ['absent', 'present']);
+      assert.strictEqual(calls, 2);
+    });
+
     it('reads Vary given to writeHead', async () => {
       app = await listen(
         [duplicateHandler()],
