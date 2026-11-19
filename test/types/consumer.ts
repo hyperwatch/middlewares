@@ -17,25 +17,55 @@ app.use(
   })
 );
 
-const limiter: middlewares.ServiceLimiter = serviceLimiter({
-  essentialIdentities: ['Facebook'],
-  nonEssentialIdentities: new Set(['Semrush']),
-  initialLevel: 0,
-  getIdentity: async (req) =>
-    req.identity ?? req.headers['x-identity']?.toString(),
-  onLimited: (req, res) => {
-    res.statusCode = 503;
-    res.end();
+const { defaultClassify } = middlewares;
+
+// The default
+const limiter: middlewares.ServiceLimiter = serviceLimiter();
+app.use(limiter);
+limiter.warmUp([
+  { after: 30, serve: 'normal' },
+  { after: 180, serve: 'low' },
+]);
+const serving: string = limiter.serving();
+
+// One exception around the default, and every option
+serviceLimiter({
+  classify(context) {
+    if (context.identity === 'PetalBot') {
+      return 'low';
+    }
+    return defaultClassify(context);
   },
+  skip: (req) => req.url === '/health',
+  identify: async (req) => ({
+    identity: req.identity ?? req.headers['x-identity']?.toString(),
+    category: undefined,
+  }),
+  timeout: 1,
   message: 'Later.',
+  respond: (req, res, { retryAfter }) => {
+    res.statusCode = 429;
+    res.end(retryAfter === undefined ? '' : String(retryAfter));
+  },
+  onLimited: (req, { identity, category, priority, serving }) => {
+    console.log(req.url, identity, category, priority, serving);
+  },
+  onError: (error, { kind, req }) => {
+    console.error(kind, req.url, error.message);
+  },
 });
 
-app.use(limiter);
-limiter.increaseServiceLevel(50);
-const level: number = limiter.getServiceLevel();
+// Other priorities, with their own policy
+serviceLimiter({
+  priorities: ['urgent', 'background'],
+  classify: async ({ identity, category, req }) => {
+    if (!identity || req.url === '/') {
+      return undefined;
+    }
+    return category === 'monitoring' ? 'urgent' : 'background';
+  },
+});
 
 // Plain http too
 const handler: middlewares.Middleware = duplicateHandler();
-http.createServer((req, res) =>
-  handler(req, res, () => res.end(String(level)))
-);
+http.createServer((req, res) => handler(req, res, () => res.end(serving)));
