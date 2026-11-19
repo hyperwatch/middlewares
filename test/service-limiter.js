@@ -96,6 +96,9 @@ describe('serviceLimiter', () => {
     assert.throws(() => serviceLimiter({ initialLevel: -10 }), RangeError);
     assert.throws(() => limiter.increaseServiceLevel(101), RangeError);
     assert.throws(() => limiter.warmUp([{ after: 1, level: NaN }]), RangeError);
+    for (const after of [-1, NaN, Infinity, 30 * 24 * 3600]) {
+      assert.throws(() => limiter.warmUp([{ after, level: 100 }]), RangeError);
+    }
     await assert.rejects(limiter.setServiceLevel(-50), RangeError);
     await assert.rejects(
       limiter.setServiceLevel(40, { until: new Date(NaN) }),

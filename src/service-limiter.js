@@ -83,6 +83,9 @@ const IDENTIFIED_LEVEL = 50;
 // Milliseconds requests wait at most for the first read of the store
 const FIRST_READ_WAIT = 1000;
 
+// Seconds: the longest delay of Node's timers (2^31 - 1 ms, about 24.8 days)
+const MAX_DELAY = 2_147_483.647;
+
 /** @param {unknown} level */
 const isLevel = (level) =>
   typeof level === 'number' && level >= 0 && level <= 100;
@@ -318,8 +321,14 @@ function serviceLimiter({
   return Object.assign(middleware, {
     /** @param {WarmUpStep[]} steps */
     warmUp(steps) {
-      for (const { level } of steps) {
+      for (const { after, level } of steps) {
         checkLevel(level);
+        // Longer delays overflow Node's timers, which then fire at once
+        if (!(after >= 0 && after <= MAX_DELAY)) {
+          throw new RangeError(
+            `Warm-up step delay must be from 0 to ${MAX_DELAY} seconds: ${after}`
+          );
+        }
       }
       // A new schedule replaces the previous one
       for (const timer of timers) {
