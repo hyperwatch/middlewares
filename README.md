@@ -1,6 +1,6 @@
 # Hyperwatch Middlewares
 
-Node.js HTTP middlewares (Express, Connect or plain `http`) to protect a server from heavy traffic.
+Node.js HTTP middlewares (Express, Connect or plain `http`) to protect a server from heavy traffic. Node.js 24 or later, TypeScript declarations included.
 
 ```sh
 npm install @hyperwatch/middlewares

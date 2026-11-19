@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [22.x, 24.x, 26.x]
+        node-version: [24.x, 26.x]
 
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +24,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-      - run: npm install
+      - run: npm ci
       - run: npm test
 
   lint:
@@ -35,7 +35,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24.x
-      - run: npm install
+      - run: npm ci
       - run: npm run lint
 
   prettier:
@@ -46,5 +46,30 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24.x
-      - run: npm install
+      - run: npm ci
       - run: npm run prettier:check
+
+  depcheck:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+      - run: npm ci
+      - run: npm run depcheck
+
+  types:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+      - run: npm ci
+      # The sources (JSDoc), then the declarations the package publishes,
+      # installed from the packed package with its dependencies only
+      - run: npm run type:check
+      - run: npm run types:test
