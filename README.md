@@ -1,6 +1,6 @@
 # Hyperwatch Middlewares
 
-Node.js HTTP middlewares (Express, Connect or plain `http`) to protect a server from heavy traffic.
+Node.js HTTP middlewares (Express, Connect or plain `http`) to protect a server from heavy traffic. Node.js 24 or later, TypeScript declarations included.
 
 ```sh
 npm install @hyperwatch/middlewares
@@ -15,19 +15,27 @@ const { duplicateHandler } = require('@hyperwatch/middlewares');
 
 app.use(
   duplicateHandler({
-    // Responses for logged-in users must never be shared
-    skip: (req) => Boolean(req.headers.cookie || req.headers.authorization),
+    // Pages that are never worth sharing
+    skip: (req) => req.url.startsWith('/dashboard'),
   })
 );
 ```
 
-| Option    | Default        | Description                                                  |
-| --------- | -------------- | ------------------------------------------------------------ |
-| `skip`    | none           | `(req) => boolean`, true processes the request normally      |
-| `key`     | method and URL | `(req) => string`, requests with the same key are duplicates |
-| `timeout` | `30`           | Seconds after which a pending request is forgotten           |
+| Option             | Default        | Description                                                                               |
+| ------------------ | -------------- | ----------------------------------------------------------------------------------------- |
+| `methods`          | `GET`, `HEAD`  | Methods whose requests can be shared                                                      |
+| `shareCredentials` | `false`        | Also share requests carrying a cookie or an `Authorization` header                        |
+| `skip`             | none           | `(req) => boolean`, true processes the request normally, on top of the above              |
+| `key`              | method and URL | `(req) => string`, requests with the same key are duplicates                              |
+| `timeout`          | `30`           | Seconds after which requests still waiting for a response that hasn't started get a `503` |
 
-A request only joins one whose response hasn't started yet; otherwise it is processed on its own.
+What is never shared:
+
+- Requests carrying credentials, unless `shareCredentials`: their responses can depend on who asks.
+- A response that already started: a request arriving then is processed on its own.
+- A response that sets a cookie: it was made for one client. Requests waiting for it are processed on their own.
+
+If the first response hasn't started after `timeout` (the application hangs, or gave up when its client left), the requests waiting for it all get a `503` at once. A response that started is left to finish.
 
 ## Service limiter
 

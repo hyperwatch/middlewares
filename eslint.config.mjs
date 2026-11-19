@@ -5,14 +5,14 @@ import globals from 'globals';
 
 export default [
   {
-    ignores: ['eslint.config.mjs'],
+    ignores: ['eslint.config.mjs', 'types/**'],
   },
   js.configs.recommended,
   nodePlugin.configs['flat/recommended'],
   importX.flatConfigs.recommended,
   {
     languageOptions: {
-      ecmaVersion: 2022,
+      ecmaVersion: 'latest',
       globals: {
         ...globals.node,
         ...globals.es2021,
@@ -55,7 +55,8 @@ export default [
 
       // require at least one whitespace after comments( // and /*)
       // https://eslint.org/docs/rules/spaced-comment
-      'spaced-comment': ['warn', 'always'],
+      // `///` for TypeScript's triple-slash directives
+      'spaced-comment': ['warn', 'always', { markers: ['/'] }],
       // Require Following Curly Brace Conventions
       // https://eslint.org/docs/rules/curly
       curly: ['warn', 'all'],
@@ -86,6 +87,16 @@ export default [
       globals: {
         ...globals.mocha,
       },
+    },
+  },
+  // Scripts: allow experimental Node.js features (e.g. fetch)
+  {
+    files: ['scripts/**/*.js'],
+    rules: {
+      'n/no-unsupported-features/node-builtins': [
+        'error',
+        { allowExperimental: true },
+      ],
     },
   },
 ];

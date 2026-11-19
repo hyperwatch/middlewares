@@ -8,31 +8,64 @@
     "url": "git+https://github.com/hyperwatch/middlewares.git"
   },
   "main": "src/index.js",
-  "types": "src/index.d.ts",
   "files": [
-    "src"
+    "src",
+    "types"
   ],
-  "engines": {
-    "node": ">=22"
-  },
   "scripts": {
+    "depcheck": "depcheck",
     "lint": "eslint",
     "lint:fix": "eslint --fix",
-    "prettier": "prettier \"**/*.@(js|ts|json|md|yml)\"",
+    "prepack": "npm run types",
+    "prepare": "husky",
+    "prettier": "prettier \"**/*.@(js|cjs|ts|cts|json|md|yml)\"",
     "prettier:check": "npm run prettier -- --list-different",
     "prettier:write": "npm run prettier -- --write",
-    "test": "mocha --recursive"
+    "test": "mocha --recursive",
+    "type:check": "tsc -p .",
+    "types": "node -e \"require('fs').rmSync('types', { recursive: true, force: true })\" && tsc -p tsconfig.types.json",
+    "types:test": "node scripts/test-types.js"
   },
+  "types": "types/index.d.ts",
   "dependencies": {
     "debug": "^4.4.3"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/debug": "^4.1.13",
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.19.2",
+    "depcheck": "^1.4.7",
     "eslint": "^10.12.0",
     "eslint-plugin-import-x": "^4.17.1",
     "eslint-plugin-n": "^18.4.1",
+    "express": "^5.3.0",
     "globals": "^17.13.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.6.1",
     "mocha": "^12.0.3",
-    "prettier": "^3.9.9"
+    "prettier": "^3.9.9",
+    "prettier-package-json": "^2.8.0",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "depcheck": {
+    "ignores": [
+      "prettier-package-json",
+      "@types/*"
+    ],
+    "ignorePatterns": [
+      "test/types"
+    ]
+  },
+  "lint-staged": {
+    "*.{js,cjs,ts,cts,json,md,yml}": [
+      "prettier --write"
+    ],
+    "package.json": [
+      "prettier-package-json --write"
+    ]
   }
 }
