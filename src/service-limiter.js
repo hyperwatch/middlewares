@@ -343,6 +343,9 @@ function serviceLimiter({
       const value = { level: checkLevel(level) };
       if (until !== undefined) {
         value.until = new Date(until).getTime();
+        if (!Number.isFinite(value.until)) {
+          throw new RangeError(`Invalid end for the service level: ${until}`);
+        }
       }
       debug(`Setting the manual level to ${level}`);
       await store.set(value);
