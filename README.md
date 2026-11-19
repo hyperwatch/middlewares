@@ -21,19 +21,20 @@ app.use(
 );
 ```
 
-| Option             | Default        | Description                                                                               |
-| ------------------ | -------------- | ----------------------------------------------------------------------------------------- |
-| `methods`          | `GET`, `HEAD`  | Methods whose requests can be shared                                                      |
-| `shareCredentials` | `false`        | Also share requests carrying a cookie or an `Authorization` header                        |
-| `skip`             | none           | `(req) => boolean`, true processes the request normally, on top of the above              |
-| `key`              | method and URL | `(req) => string`, requests with the same key are duplicates                              |
-| `timeout`          | `30`           | Seconds after which requests still waiting for a response that hasn't started get a `503` |
+| Option             | Default              | Description                                                                               |
+| ------------------ | -------------------- | ----------------------------------------------------------------------------------------- |
+| `methods`          | `GET`, `HEAD`        | Methods whose requests can be shared                                                      |
+| `shareCredentials` | `false`              | Also share requests carrying a cookie or an `Authorization` header                        |
+| `skip`             | none                 | `(req) => boolean`, true processes the request normally, on top of the above              |
+| `key`              | method, host and URL | `(req) => string`, requests with the same key are duplicates                              |
+| `timeout`          | `30`                 | Seconds after which requests still waiting for a response that hasn't started get a `503` |
 
 What is never shared:
 
 - Requests carrying credentials, unless `shareCredentials`: their responses can depend on who asks.
 - A response that already started: a request arriving then is processed on its own.
 - A response that sets a cookie: it was made for one client. Requests waiting for it are processed on their own.
+- A response with `Vary`, to requests that differ from the first one in a header it names (as an HTTP cache would): those are processed on their own. `Vary: *` shares nothing. `Accept-Encoding` is ignored: a shared response is passed on uncompressed, compression middleware compresses the first one only.
 
 If the first response hasn't started after `timeout` (the application hangs, or gave up when its client left), the requests waiting for it all get a `503` at once. A response that started is left to finish.
 
