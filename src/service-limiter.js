@@ -79,6 +79,9 @@ const DEFAULT_MESSAGE = 'Service Limited. Try again later.';
 const NON_ESSENTIAL_LEVEL = 100;
 const IDENTIFIED_LEVEL = 50;
 
+// Milliseconds requests wait at most for the first read of the store
+const FIRST_READ_WAIT = 1000;
+
 /** @param {Request} req */
 async function defaultGetIdentity(req) {
   if (!req.identity && req.hyperwatch?.getIdentity) {
@@ -140,6 +143,8 @@ function serviceLimiter({
 
   /** @type {{ at: number, level: number }[]} Upcoming warm-up steps */
   let schedule = [];
+  /** @type {NodeJS.Timeout[]} */
+  let timers = [];
 
   /** @type {ManualLevel | null} As last read from the store */
   let manual = null;
@@ -165,7 +170,15 @@ function serviceLimiter({
     })();
     return reading;
   };
-  refresh();
+  // Requests wait for the first read, a manual level may already be set,
+  // but not more than FIRST_READ_WAIT if the store is slow
+  /** @type {Promise<void> | null} */
+  let firstRead = Promise.race([
+    refresh(),
+    new Promise((resolve) => setTimeout(resolve, FIRST_READ_WAIT).unref()),
+  ]).then(() => {
+    firstRead = null;
+  });
   setInterval(refresh, refreshInterval * 1000).unref();
 
   /** The manual level, unless it ended */
@@ -225,6 +238,9 @@ function serviceLimiter({
    * @param {Next} next
    */
   const middleware = async (req, res, next) => {
+    if (firstRead) {
+      await firstRead;
+    }
     if (getServiceLevel() >= NON_ESSENTIAL_LEVEL) {
       next();
       return;
@@ -250,13 +266,17 @@ function serviceLimiter({
   return Object.assign(middleware, {
     /** @param {WarmUpStep[]} steps */
     warmUp(steps) {
+      // A new schedule replaces the previous one
+      for (const timer of timers) {
+        clearTimeout(timer);
+      }
       const start = Date.now();
       schedule = steps
         .map(({ after, level }) => ({ at: start + after * 1000, level }))
         .sort((a, b) => a.at - b.at);
-      for (const { at, level } of schedule) {
-        setTimeout(() => increaseServiceLevel(level), at - start).unref();
-      }
+      timers = schedule.map(({ at, level }) =>
+        setTimeout(() => increaseServiceLevel(level), at - start).unref()
+      );
     },
     increaseServiceLevel,
     /**

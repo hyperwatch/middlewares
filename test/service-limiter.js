@@ -217,6 +217,37 @@ describe('serviceLimiter', () => {
   });
 
   describe('races', () => {
+    it('waits for the first read of the store', async () => {
+      const store = {
+        get: async () => {
+          await sleep(100);
+          return { level: 40 };
+        },
+        set: async () => {},
+      };
+      await start({ initialLevel: 100, store });
+      assert.strictEqual(await statusFor('Googlebot'), 503);
+    });
+
+    it('waits 1 second at most for a slow store', async () => {
+      const store = {
+        get: () => new Promise(() => {}),
+        set: async () => {},
+      };
+      await start({ initialLevel: 100, store });
+      const started = Date.now();
+      assert.strictEqual(await statusFor('Googlebot'), 200);
+      assert.ok(Date.now() - started < 1500);
+    });
+
+    it('a new warm-up schedule replaces the previous one', async () => {
+      const limiter = await start();
+      limiter.warmUp([{ after: 0.05, level: 100 }]);
+      limiter.warmUp([{ after: 30, level: 50 }]);
+      await sleep(100);
+      assert.strictEqual(limiter.getServiceLevel(), 0);
+    });
+
     it('a read started before a write does not overwrite it', async () => {
       let shared = null;
       const store = {
