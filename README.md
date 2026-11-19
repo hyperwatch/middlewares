@@ -81,7 +81,7 @@ server.listen(port, () => {
 | `onLimited`              | a `503` with `message`, `Retry-After` when known    | `(req, res, { level, warmingUp, retryAfter }) => void`                     |
 | `message`                | `Service Limited. Try again later.`                 | Body of the default `503`                                                  |
 
-The level applied is the lower of two:
+Levels go from 0 to 100: other values throw a `RangeError`, and an invalid value read from the store is ignored. The level applied is the lower of two:
 
 - **Warm-up level**, per process: `warmUp(steps)` raises it step by step (`after` in seconds), `increaseServiceLevel(level)` at once. A request limited while warming up gets `Retry-After` with the seconds until the step that serves it: 30 for an identified robot and 180 for a non-essential one above.
 - **Manual level**, shared by every process using the same `store`: `setServiceLevel(level, { until })` and `clearServiceLevel()`, for instance from an admin endpoint. Each process reads the store every `refreshInterval` seconds, and keeps the last level it read if the store fails. At start, requests wait for the first read, 1 second at most. A new `warmUp()` replaces the previous schedule. A manual level can only restrict, never cut a warm-up short. A request it limits gets `Retry-After` until `until`, else the `retryAfter` option, else none.

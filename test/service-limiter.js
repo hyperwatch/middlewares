@@ -82,14 +82,28 @@ describe('serviceLimiter', () => {
     assert.strictEqual(res.body, 'Service Limited. Try again later.');
   });
 
-  it('never limits unidentified requests and essential identities, even below 0', async () => {
-    const limiter = await start({ initialLevel: -10 });
+  it('accepts levels from 0 to 100 only', async () => {
+    const limiter = await start();
+    assert.throws(() => serviceLimiter({ initialLevel: -10 }), RangeError);
+    assert.throws(() => limiter.increaseServiceLevel(101), RangeError);
+    assert.throws(() => limiter.warmUp([{ after: 1, level: NaN }]), RangeError);
+    await assert.rejects(limiter.setServiceLevel(-50), RangeError);
+    assert.strictEqual(limiter.getServiceLevel(), 0);
+  });
+
+  it('ignores an invalid level in the store', async () => {
+    let stored = { level: 40 };
+    const store = { get: async () => stored, set: async () => {} };
+    const limiter = await start({
+      initialLevel: 100,
+      store,
+      refreshInterval: 0.05,
+    });
+    await sleep(100);
+    stored = { level: -5 };
+    await sleep(100);
+    assert.strictEqual(limiter.getServiceLevel(), 40);
     assert.strictEqual(await statusFor(), 200);
-    assert.strictEqual(await statusFor('Facebook'), 200);
-    await limiter.setServiceLevel(-50);
-    assert.strictEqual(await statusFor(), 200);
-    assert.strictEqual(await statusFor('Facebook'), 200);
-    assert.strictEqual(await statusFor('Googlebot'), 503);
   });
 
   describe('Retry-After', () => {

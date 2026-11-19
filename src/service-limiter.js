@@ -82,6 +82,41 @@ const IDENTIFIED_LEVEL = 50;
 // Milliseconds requests wait at most for the first read of the store
 const FIRST_READ_WAIT = 1000;
 
+/** @param {unknown} level */
+const isLevel = (level) =>
+  typeof level === 'number' && level >= 0 && level <= 100;
+
+/**
+ * Levels go from 0 to 100.
+ *
+ * @param {unknown} level
+ * @returns {number}
+ */
+function checkLevel(level) {
+  if (!isLevel(level)) {
+    throw new RangeError(`Service level must be from 0 to 100: ${level}`);
+  }
+  return /** @type {number} */ (level);
+}
+
+/**
+ * A manual level read from the store, or null if there is none or it's
+ * invalid (written by hand, by another version…).
+ *
+ * @param {unknown} value
+ * @returns {ManualLevel | null}
+ */
+function readManual(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const { level, until } = /** @type {Partial<ManualLevel>} */ (value);
+  if (!isLevel(level) || (until !== undefined && !Number.isFinite(until))) {
+    throw new TypeError(`Invalid manual level: ${JSON.stringify(value)}`);
+  }
+  return /** @type {ManualLevel} */ (value);
+}
+
 /** @param {Request} req */
 async function defaultGetIdentity(req) {
   if (!req.identity && req.hyperwatch?.getIdentity) {
@@ -139,7 +174,7 @@ function serviceLimiter({
   const essential = new Set(essentialIdentities);
   const nonEssential = new Set(nonEssentialIdentities);
 
-  let warmUpLevel = initialLevel;
+  let warmUpLevel = checkLevel(initialLevel);
 
   /** @type {{ at: number, level: number }[]} Upcoming warm-up steps */
   let schedule = [];
@@ -162,16 +197,16 @@ function serviceLimiter({
     }
     const read = ++reads;
     const before = writes;
-    const result = store.get().then(
-      (value) => {
+    const result = store
+      .get()
+      .then((value) => {
         if (read === reads && writes === before) {
-          manual = value ?? null;
+          manual = readManual(value);
         }
-      },
-      (err) => {
+      })
+      .catch((err) => {
         debug(`Reading the manual level failed, keeping the last one: ${err}`);
-      }
-    );
+      });
     // A read that hangs doesn't block the next ones
     const giveUp = new Promise((resolve) => {
       setTimeout(resolve, refreshInterval * 1000).unref();
@@ -238,7 +273,7 @@ function serviceLimiter({
 
   /** @param {number} newLevel */
   const increaseServiceLevel = (newLevel) => {
-    if (newLevel > warmUpLevel) {
+    if (checkLevel(newLevel) > warmUpLevel) {
       debug(`Increasing warm-up level to ${newLevel}`);
       warmUpLevel = newLevel;
     }
@@ -278,6 +313,9 @@ function serviceLimiter({
   return Object.assign(middleware, {
     /** @param {WarmUpStep[]} steps */
     warmUp(steps) {
+      for (const { level } of steps) {
+        checkLevel(level);
+      }
       // A new schedule replaces the previous one
       for (const timer of timers) {
         clearTimeout(timer);
@@ -297,7 +335,7 @@ function serviceLimiter({
      */
     async setServiceLevel(level, { until } = {}) {
       /** @type {ManualLevel} */
-      const value = { level };
+      const value = { level: checkLevel(level) };
       if (until !== undefined) {
         value.until = new Date(until).getTime();
       }
