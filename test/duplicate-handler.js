@@ -155,4 +155,97 @@ describe('duplicateHandler', () => {
       ]);
     });
   });
+
+  describe('defaults', () => {
+    it('shares GET and HEAD only', async () => {
+      app = await listen([duplicateHandler()], slowHandler);
+      await Promise.all(
+        [1, 2].map(() => get(`${app.url}/a`, { method: 'POST' }))
+      );
+      assert.strictEqual(calls, 2);
+    });
+
+    it('shares the methods given', async () => {
+      app = await listen(
+        [duplicateHandler({ methods: ['post'] })],
+        slowHandler
+      );
+      await Promise.all(
+        [1, 2].map(() => get(`${app.url}/a`, { method: 'POST' }))
+      );
+      assert.strictEqual(calls, 1);
+    });
+
+    it('does not share requests carrying credentials', async () => {
+      app = await listen([duplicateHandler()], slowHandler);
+      await Promise.all([
+        get(`${app.url}/a`, { headers: { cookie: 'session=1' } }),
+        get(`${app.url}/a`, { headers: { cookie: 'session=2' } }),
+        get(`${app.url}/a`, { headers: { authorization: 'Bearer x' } }),
+        get(`${app.url}/a`, { headers: { authorization: 'Bearer x' } }),
+      ]);
+      assert.strictEqual(calls, 4);
+    });
+
+    it('shares them with shareCredentials', async () => {
+      app = await listen(
+        [duplicateHandler({ shareCredentials: true })],
+        slowHandler
+      );
+      await Promise.all(
+        [1, 2].map(() =>
+          get(`${app.url}/a`, { headers: { authorization: 'Bearer x' } })
+        )
+      );
+      assert.strictEqual(calls, 1);
+    });
+  });
+
+  describe('timeout', () => {
+    it('fails the waiting requests at once when the response never starts', async () => {
+      const hung = [];
+      app = await listen([duplicateHandler({ timeout: 0.3 })], (req, res) => {
+        calls++;
+        hung.push(res);
+      });
+      const first = fetch(`${app.url}/a`).catch(() => null);
+      await sleep(20);
+      const started = Date.now();
+      const waiting = await Promise.all([1, 2].map(() => get(`${app.url}/a`)));
+      assert.ok(Date.now() - started < 1000);
+      assert.deepStrictEqual(
+        waiting.map((res) => [res.status, res.body]),
+        [
+          [503, 'Service Unavailable'],
+          [503, 'Service Unavailable'],
+        ]
+      );
+      assert.strictEqual(calls, 1);
+      for (const res of hung) {
+        res.destroy();
+      }
+      await first;
+    });
+
+    it('leaves a response that started', async () => {
+      app = await listen(
+        [duplicateHandler({ timeout: 0.1 })],
+        async (req, res) => {
+          calls++;
+          await sleep(50);
+          res.write('hello ');
+          await sleep(150);
+          res.end('world');
+        }
+      );
+      const responses = await Promise.all(
+        [1, 2].map(() => get(`${app.url}/a`))
+      );
+      assert.deepStrictEqual(
+        responses.map((res) => res.body),
+        ['hello world', 'hello world']
+      );
+      assert.strictEqual(calls, 1);
+    });
+  });
 });

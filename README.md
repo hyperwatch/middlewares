@@ -15,19 +15,27 @@ const { duplicateHandler } = require('@hyperwatch/middlewares');
 
 app.use(
   duplicateHandler({
-    // Responses for logged-in users must never be shared
-    skip: (req) => Boolean(req.headers.cookie || req.headers.authorization),
+    // Pages that are never worth sharing
+    skip: (req) => req.url.startsWith('/dashboard'),
   })
 );
 ```
 
-| Option    | Default        | Description                                                  |
-| --------- | -------------- | ------------------------------------------------------------ |
-| `skip`    | none           | `(req) => boolean`, true processes the request normally      |
-| `key`     | method and URL | `(req) => string`, requests with the same key are duplicates |
-| `timeout` | `30`           | Seconds after which a pending request is forgotten           |
+| Option             | Default        | Description                                                                               |
+| ------------------ | -------------- | ----------------------------------------------------------------------------------------- |
+| `methods`          | `GET`, `HEAD`  | Methods whose requests can be shared                                                      |
+| `shareCredentials` | `false`        | Also share requests carrying a cookie or an `Authorization` header                        |
+| `skip`             | none           | `(req) => boolean`, true processes the request normally, on top of the above              |
+| `key`              | method and URL | `(req) => string`, requests with the same key are duplicates                              |
+| `timeout`          | `30`           | Seconds after which requests still waiting for a response that hasn't started get a `503` |
 
-A request is processed on its own when the response it would join has already started, or sets a cookie: such a response was made for one client. If the cookie only appears once requests are waiting, they are all processed on their own. Requests that carry credentials (cookies, `Authorization`) should still be skipped: their responses can depend on who asks without setting a cookie.
+What is never shared:
+
+- Requests carrying credentials, unless `shareCredentials`: their responses can depend on who asks.
+- A response that already started: a request arriving then is processed on its own.
+- A response that sets a cookie: it was made for one client. Requests waiting for it are processed on their own.
+
+If the first response hasn't started after `timeout` (the application hangs, or gave up when its client left), the requests waiting for it all get a `503` at once. A response that started is left to finish.
 
 ## Service limiter
 
