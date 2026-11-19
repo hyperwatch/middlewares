@@ -51,6 +51,7 @@ const store: middlewares.LevelStore = {
 };
 serviceLimiter({ store, refreshInterval: 5 });
 const level: number = limiter.getServiceLevel();
+process.on('SIGTERM', () => limiter.close());
 
 // Plain http too
 const handler: middlewares.Middleware = duplicateHandler();

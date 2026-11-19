@@ -67,6 +67,7 @@ const debug = require('debug')('hyperwatch:service-limiter');
  * @property {() => Promise<void>} clearServiceLevel Removes the manual level.
  * @property {() => number} getServiceLevel The level applied: the lower of
  *   the warm-up and manual levels.
+ * @property {() => void} close Stops reading the store and the warm-up.
  */
 
 /**
@@ -184,48 +185,52 @@ function serviceLimiter({
   /** @type {ManualLevel | null} As last read from the store */
   let manual = null;
 
-  // Counts the writes and the reads: the result of a read is dropped when a
-  // write or a newer read started after it
-  let writes = 0;
-  let reads = 0;
-  /** @type {Promise<void> | null} The read in progress, one at a time */
+  // Reads are numbered when they start, writes once written: a read's result
+  // is applied unless something newer was (a later read, or a write)
+  let sequence = 0;
+  let applied = 0;
+  /** @type {Promise<void> | null} The read being waited for */
   let reading = null;
 
-  const refresh = () => {
-    if (reading) {
-      return reading;
-    }
-    const read = ++reads;
-    const before = writes;
-    const result = store
+  /** Reads the store; resolves with the read's result */
+  const read = () => {
+    const number = ++sequence;
+    return store
       .get()
       .then((value) => {
-        if (read === reads && writes === before) {
+        if (number > applied) {
           manual = readManual(value);
+          applied = number;
         }
       })
       .catch((err) => {
         debug(`Reading the manual level failed, keeping the last one: ${err}`);
       });
-    // A read that hangs doesn't block the next ones
+  };
+
+  const refresh = () => {
+    if (reading) {
+      return;
+    }
+    // A read that hangs doesn't block the next ones after refreshInterval
     const giveUp = new Promise((resolve) => {
       setTimeout(resolve, refreshInterval * 1000).unref();
     });
-    reading = Promise.race([result, giveUp]).then(() => {
+    reading = Promise.race([read(), giveUp]).then(() => {
       reading = null;
     });
-    return reading;
   };
-  // Requests wait for the first read, a manual level may already be set,
-  // but not more than FIRST_READ_WAIT if the store is slow
+
+  // Requests wait for the first read's result, a manual level may already
+  // be set, but not more than FIRST_READ_WAIT if the store is slow
   /** @type {Promise<void> | null} */
   let firstRead = Promise.race([
-    refresh(),
+    read(),
     new Promise((resolve) => setTimeout(resolve, FIRST_READ_WAIT).unref()),
   ]).then(() => {
     firstRead = null;
   });
-  setInterval(refresh, refreshInterval * 1000).unref();
+  const polling = setInterval(refresh, refreshInterval * 1000).unref();
 
   /** The manual level, unless it ended */
   const currentManual = () =>
@@ -341,16 +346,24 @@ function serviceLimiter({
       }
       debug(`Setting the manual level to ${level}`);
       await store.set(value);
-      writes++;
+      // Numbered once written: any read started before is stale
+      applied = ++sequence;
       manual = value;
     },
     async clearServiceLevel() {
       debug('Clearing the manual level');
       await store.set(null);
-      writes++;
+      // Numbered once written: any read started before is stale
+      applied = ++sequence;
       manual = null;
     },
     getServiceLevel,
+    close() {
+      clearInterval(polling);
+      for (const timer of timers) {
+        clearTimeout(timer);
+      }
+    },
   });
 }
 

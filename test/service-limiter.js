@@ -7,6 +7,8 @@ const { listen, get } = require('./helpers');
 
 describe('serviceLimiter', () => {
   let app;
+  /** Limiters to close after each test */
+  const limiters = [];
 
   const start = async (options) => {
     const limiter = serviceLimiter({
@@ -15,6 +17,7 @@ describe('serviceLimiter', () => {
       getIdentity: (req) => req.headers['x-identity'],
       ...options,
     });
+    limiters.push(limiter);
     app = await listen([limiter], (req, res) => res.end('ok'));
     return limiter;
   };
@@ -24,7 +27,12 @@ describe('serviceLimiter', () => {
     return (await get(app.url, { headers })).status;
   };
 
-  afterEach(() => app.close());
+  afterEach(() => {
+    app.close();
+    for (const limiter of limiters.splice(0)) {
+      limiter.close();
+    }
+  });
 
   it('below 50: only essential identities and unidentified requests', async () => {
     await start();
@@ -67,6 +75,7 @@ describe('serviceLimiter', () => {
 
   it("reads Hyperwatch's identity by default", async () => {
     const limiter = serviceLimiter();
+    limiters.push(limiter);
     app = await listen(
       [
         (req, res, next) => {
@@ -206,6 +215,7 @@ describe('serviceLimiter', () => {
         },
       };
       const other = serviceLimiter({ initialLevel: 100, store });
+      limiters.push(other);
       const limiter = await start({
         initialLevel: 100,
         store,
@@ -302,6 +312,59 @@ describe('serviceLimiter', () => {
       await sleep(10);
       answers[0]({ level: 30 });
       await sleep(10);
+      assert.strictEqual(limiter.getServiceLevel(), 40);
+    });
+
+    it('applies the reads of a store slower than refreshInterval', async () => {
+      const store = {
+        get: async () => {
+          await sleep(150);
+          return { level: 40 };
+        },
+        set: async () => {},
+      };
+      const limiter = await start({
+        initialLevel: 100,
+        store,
+        refreshInterval: 0.05,
+      });
+      await sleep(400);
+      assert.strictEqual(limiter.getServiceLevel(), 40);
+    });
+
+    it('waits for the first result, not refreshInterval', async () => {
+      const store = {
+        get: async () => {
+          await sleep(150);
+          return { level: 40 };
+        },
+        set: async () => {},
+      };
+      await start({ initialLevel: 100, store, refreshInterval: 0.05 });
+      assert.strictEqual(await statusFor('Googlebot'), 503);
+    });
+
+    it('a read started during a write does not overwrite it', async () => {
+      let stored = null;
+      const store = {
+        get: async () => {
+          const value = stored;
+          await sleep(20);
+          return value;
+        },
+        set: async (value) => {
+          await sleep(50);
+          stored = value;
+        },
+      };
+      const limiter = await start({
+        initialLevel: 100,
+        store,
+        refreshInterval: 0.01,
+      });
+      await limiter.setServiceLevel(40);
+      assert.strictEqual(limiter.getServiceLevel(), 40);
+      await sleep(50);
       assert.strictEqual(limiter.getServiceLevel(), 40);
     });
 
