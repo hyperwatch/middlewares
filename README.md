@@ -40,13 +40,15 @@ If the first response hasn't started after `timeout` (the application hangs, or 
 
 ## Service limiter
 
-Turns identified robots away with a `503` while a server warms up (fresh caches, just deployed). The service level starts at `initialLevel` and only goes up:
+Turns identified robots away with a `503` while a server warms up (fresh caches, just deployed), or while a level set from outside says so:
 
 | Level    | Served                                         |
 | -------- | ---------------------------------------------- |
 | < 50     | Unidentified requests and essential identities |
 | 50 to 99 | Everything except the non-essential identities |
 | 100      | Everything                                     |
+
+Requests without an identity are never limited: people can't be told apart from unverified robots.
 
 ```js
 const { serviceLimiter } = require('@hyperwatch/middlewares');
@@ -60,23 +62,44 @@ const limiter = serviceLimiter({
 app.use(limiter);
 
 server.listen(port, () => {
-  setTimeout(() => limiter.increaseServiceLevel(50), 30 * 1000);
-  setTimeout(() => limiter.increaseServiceLevel(100), 3 * 60 * 1000);
+  limiter.warmUp([
+    { after: 30, level: 50 },
+    { after: 180, level: 100 },
+  ]);
 });
 ```
 
-| Option                   | Default                                             | Description                       |
-| ------------------------ | --------------------------------------------------- | --------------------------------- |
-| `essentialIdentities`    | `[]`                                                | Served from level 0               |
-| `nonEssentialIdentities` | `[]`                                                | Served only at level 100          |
-| `initialLevel`           | `0`                                                 |                                   |
-| `getIdentity`            | `req.identity`, else `req.hyperwatch.getIdentity()` | `(req) => identity`, may be async |
-| `onLimited`              | a `503` with `message`                              | `(req, res) => void`              |
-| `message`                | `Service Limited. Try again later.`                 | Body of the default `503`         |
+| Option                   | Default                                             | Description                                                                |
+| ------------------------ | --------------------------------------------------- | -------------------------------------------------------------------------- |
+| `essentialIdentities`    | `[]`                                                | Served from level 0                                                        |
+| `nonEssentialIdentities` | `[]`                                                | Served only at level 100                                                   |
+| `initialLevel`           | `0`                                                 | Warm-up level at creation                                                  |
+| `getIdentity`            | `req.identity`, else `req.hyperwatch.getIdentity()` | `(req) => identity`, may be async                                          |
+| `store`                  | in memory                                           | Where the manual level is kept: `{ get, set }`, async                      |
+| `refreshInterval`        | `5`                                                 | Seconds between two reads of the store                                     |
+| `retryAfter`             | none                                                | Seconds for `Retry-After` when a manual level without end limits a request |
+| `onLimited`              | a `503` with `message`, `Retry-After` when known    | `(req, res, { level, warmingUp, retryAfter }) => void`                     |
+| `message`                | `Service Limited. Try again later.`                 | Body of the default `503`                                                  |
+
+The level applied is the lower of two:
+
+- **Warm-up level**, per process: `warmUp(steps)` raises it step by step (`after` in seconds), `increaseServiceLevel(level)` at once. A request limited while warming up gets `Retry-After` with the seconds until the step that serves it: 30 for an identified robot and 180 for a non-essential one above.
+- **Manual level**, shared by every process using the same `store`: `setServiceLevel(level, { until })` and `clearServiceLevel()`, for instance from an admin endpoint. Each process reads the store every `refreshInterval` seconds, and keeps the last level it read if the store fails. A manual level can only restrict, never cut a warm-up short. A request it limits gets `Retry-After` until `until`, else the `retryAfter` option, else none.
+
+`getServiceLevel()` returns the level applied. [Google's crawlers read `Retry-After`](https://developers.google.com/search/docs/guides/reduce-crawl-rate).
+
+A store shared through Redis:
+
+```js
+const store = {
+  get: async () => JSON.parse((await redis.get('service-level')) ?? 'null'),
+  set: async (value) => {
+    await redis.set('service-level', JSON.stringify(value));
+  },
+};
+```
 
 The identities are [Hyperwatch](https://github.com/hyperwatch/hyperwatch) identities: a request only has one once its origin is verified. With Hyperwatch's Express input, define `req.hyperwatch.getIdentity` from the augmented log, or pass your own `getIdentity`.
-
-The limiter object also has `getServiceLevel()`.
 
 ## License
 

@@ -23,15 +23,33 @@ const limiter: middlewares.ServiceLimiter = serviceLimiter({
   initialLevel: 0,
   getIdentity: async (req) =>
     req.identity ?? req.headers['x-identity']?.toString(),
-  onLimited: (req, res) => {
-    res.statusCode = 503;
-    res.end();
+  retryAfter: 3600,
+  onLimited: (req, res, { level, warmingUp, retryAfter }) => {
+    res.statusCode = warmingUp ? 503 : 429;
+    res.setHeader('X-Level', String(level));
+    res.end(retryAfter === undefined ? '' : String(retryAfter));
   },
   message: 'Later.',
 });
 
 app.use(limiter);
+limiter.warmUp([
+  { after: 30, level: 50 },
+  { after: 180, level: 100 },
+]);
 limiter.increaseServiceLevel(50);
+void limiter.setServiceLevel(40, { until: new Date(Date.now() + 600_000) });
+void limiter.clearServiceLevel();
+
+// A store shared between processes
+const values = new Map<string, string>();
+const store: middlewares.LevelStore = {
+  get: async () => JSON.parse(values.get('service-level') ?? 'null'),
+  set: async (value) => {
+    values.set('service-level', JSON.stringify(value));
+  },
+};
+serviceLimiter({ store, refreshInterval: 5 });
 const level: number = limiter.getServiceLevel();
 
 // Plain http too

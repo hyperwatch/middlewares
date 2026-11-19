@@ -7,22 +7,66 @@ const debug = require('debug')('hyperwatch:service-limiter');
  */
 
 /**
+ * @typedef {object} ManualLevel A level set from outside, shared by every
+ *   process using the same store
+ * @property {number} level
+ * @property {number} [until] Timestamp (ms) after which it no longer applies
+ */
+
+/**
+ * @typedef {object} LevelStore Where the manual level is kept: in memory by
+ *   default, or shared (Redis…) between processes
+ * @property {() => Promise<ManualLevel | null | undefined>} get
+ * @property {(value: ManualLevel | null) => Promise<void>} set
+ */
+
+/**
+ * @typedef {object} Limited What a limited request is told
+ * @property {number} level The service level
+ * @property {boolean} warmingUp Whether the server is warming up and a
+ *   warm-up step will serve this request; false when it's limited by the
+ *   manual level
+ * @property {number} [retryAfter] Seconds: until the warm-up step serving
+ *   this request, else until the manual level ends (`until`), else the
+ *   `retryAfter` option
+ */
+
+/**
+ * @typedef {object} WarmUpStep
+ * @property {number} after Seconds after `warmUp()` was called
+ * @property {number} level The service level from then on
+ */
+
+/**
  * @typedef {object} ServiceLimiterOptions
  * @property {Iterable<string>} [essentialIdentities] Served from level 0.
  * @property {Iterable<string>} [nonEssentialIdentities] Served only at level 100.
- * @property {number} [initialLevel] Default: 0.
+ * @property {number} [initialLevel] Warm-up level at creation. Default: 0.
  * @property {(req: Request) => string | undefined | Promise<string | undefined>} [getIdentity]
  *   Default: `req.identity`, else Hyperwatch's `req.hyperwatch.getIdentity()`.
- * @property {(req: Request, res: Response) => void} [onLimited] Default: a
- *   503 with `message`.
+ * @property {LevelStore} [store] Where the manual level is kept. Default: in
+ *   memory, for this process only.
+ * @property {number} [refreshInterval] Seconds between two reads of the
+ *   store. Default: 5.
+ * @property {number} [retryAfter] Seconds, for `Retry-After` when a manual
+ *   level without end limits the request. Default: none, no header.
+ * @property {(req: Request, res: Response, limited: Limited) => void} [onLimited]
+ *   Default: a 503 with `message` and `Retry-After` when known.
  * @property {string} [message] Body of the default 503.
  */
 
 /**
  * @typedef {object} ServiceLevel
- * @property {(newLevel: number) => void} increaseServiceLevel Raises the
- *   level, never lowers it.
- * @property {() => number} getServiceLevel
+ * @property {(steps: WarmUpStep[]) => void} warmUp Raises this process's
+ *   warm-up level step by step, from now.
+ * @property {(newLevel: number) => void} increaseServiceLevel Raises this
+ *   process's warm-up level now, never lowers it.
+ * @property {(level: number, options?: { until?: Date | number }) => Promise<void>} setServiceLevel
+ *   Sets the manual level, in the store: every process sharing it applies it
+ *   at its next refresh.
+ * @property {() => Promise<void>} clearServiceLevel Removes the manual level.
+ * @property {() => number} getServiceLevel The level applied: the lower of
+ *   the warm-up and manual levels.
  */
 
 /**
@@ -30,6 +74,10 @@ const debug = require('debug')('hyperwatch:service-limiter');
  */
 
 const DEFAULT_MESSAGE = 'Service Limited. Try again later.';
+
+// Below these levels, identified requests are limited
+const NON_ESSENTIAL_LEVEL = 100;
+const IDENTIFIED_LEVEL = 50;
 
 /** @param {Request} req */
 async function defaultGetIdentity(req) {
@@ -39,13 +87,30 @@ async function defaultGetIdentity(req) {
   return req.identity;
 }
 
+/** @returns {LevelStore} */
+function memoryStore() {
+  /** @type {ManualLevel | null} */
+  let value = null;
+  return {
+    get: async () => value,
+    set: async (newValue) => {
+      value = newValue;
+    },
+  };
+}
+
+/** @param {number} ms */
+const seconds = (ms) => Math.max(0, Math.ceil(ms / 1000));
+
 /**
- * Turns identified robots away while a server warms up.
+ * Turns identified robots away while a server warms up, or while a level
+ * set from outside says so.
  *
- * The service level goes from `initialLevel` to 100, raised with
- * `increaseServiceLevel`. Below 50, every identified request is limited
- * except the essential identities; below 100, the non-essential identities
- * still are. Requests without an identity are never limited.
+ * Below level 50, every identified request is limited except the essential
+ * identities; below 100, the non-essential identities still are. Requests
+ * without an identity are never limited. The level applied is the lower of
+ * this process's warm-up level (`warmUp`, `increaseServiceLevel`) and the
+ * manual level (`setServiceLevel`), shared through `store`.
  *
  * @param {ServiceLimiterOptions} [options]
  * @returns {ServiceLimiter}
@@ -55,9 +120,15 @@ function serviceLimiter({
   nonEssentialIdentities = [],
   initialLevel = 0,
   getIdentity = defaultGetIdentity,
+  store = memoryStore(),
+  refreshInterval = 5,
+  retryAfter,
   message = DEFAULT_MESSAGE,
-  onLimited = (req, res) => {
+  onLimited = (req, res, limited) => {
     res.statusCode = 503;
+    if (limited.retryAfter !== undefined) {
+      res.setHeader('Retry-After', String(limited.retryAfter));
+    }
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.end(message);
   },
@@ -65,17 +136,73 @@ function serviceLimiter({
   const essential = new Set(essentialIdentities);
   const nonEssential = new Set(nonEssentialIdentities);
 
-  let serviceLevel = initialLevel;
+  let warmUpLevel = initialLevel;
 
-  /** @param {string | undefined} identity */
-  const isLimited = (identity) => {
-    if (!identity) {
-      return false;
+  /** @type {{ at: number, level: number }[]} Upcoming warm-up steps */
+  let schedule = [];
+
+  /** @type {ManualLevel | null} As last read from the store */
+  let manual = null;
+
+  const refresh = async () => {
+    try {
+      manual = (await store.get()) ?? null;
+    } catch (err) {
+      debug(`Reading the manual level failed, keeping the last one: ${err}`);
     }
-    if (serviceLevel < 100 && nonEssential.has(identity)) {
-      return true;
+  };
+  refresh();
+  setInterval(refresh, refreshInterval * 1000).unref();
+
+  /** The manual level, unless it ended */
+  const currentManual = () =>
+    manual && (manual.until === undefined || manual.until > Date.now())
+      ? manual
+      : null;
+
+  const getServiceLevel = () =>
+    Math.min(warmUpLevel, currentManual()?.level ?? Infinity);
+
+  /**
+   * The level from which an identity is served (0 for essential ones).
+   *
+   * @param {string} identity
+   */
+  const levelServing = (identity) => {
+    if (nonEssential.has(identity)) {
+      return NON_ESSENTIAL_LEVEL;
     }
-    return serviceLevel < 50 && !essential.has(identity);
+    return essential.has(identity) ? 0 : IDENTIFIED_LEVEL;
+  };
+
+  /**
+   * @param {number} needed The level serving the request
+   * @returns {Limited}
+   */
+  const limitedFor = (needed) => {
+    const level = getServiceLevel();
+    const now = Date.now();
+    const limit = currentManual();
+    if (limit && limit.level < needed) {
+      return {
+        level,
+        warmingUp: false,
+        retryAfter:
+          limit.until === undefined ? retryAfter : seconds(limit.until - now),
+      };
+    }
+    const step = schedule.find(({ at, level }) => at > now && level >= needed);
+    return step
+      ? { level, warmingUp: true, retryAfter: seconds(step.at - now) }
+      : { level, warmingUp: false, retryAfter };
+  };
+
+  /** @param {number} newLevel */
+  const increaseServiceLevel = (newLevel) => {
+    if (newLevel > warmUpLevel) {
+      debug(`Increasing warm-up level to ${newLevel}`);
+      warmUpLevel = newLevel;
+    }
   };
 
   /**
@@ -84,7 +211,8 @@ function serviceLimiter({
    * @param {Next} next
    */
   const middleware = async (req, res, next) => {
-    if (serviceLevel >= 100) {
+    const level = getServiceLevel();
+    if (level >= NON_ESSENTIAL_LEVEL) {
       next();
       return;
     }
@@ -95,23 +223,47 @@ function serviceLimiter({
       next(err);
       return;
     }
-    if (isLimited(identity)) {
-      debug(`Service limited for '${identity}' at level ${serviceLevel}`);
-      onLimited(req, res);
+    const needed = identity ? levelServing(identity) : 0;
+    if (level < needed) {
+      debug(`Service limited for '${identity}' at level ${level}`);
+      onLimited(req, res, limitedFor(needed));
       return;
     }
     next();
   };
 
   return Object.assign(middleware, {
-    /** @param {number} newLevel */
-    increaseServiceLevel(newLevel) {
-      if (newLevel > serviceLevel) {
-        debug(`Increasing service level to ${newLevel}`);
-        serviceLevel = newLevel;
+    /** @param {WarmUpStep[]} steps */
+    warmUp(steps) {
+      const start = Date.now();
+      schedule = steps
+        .map(({ after, level }) => ({ at: start + after * 1000, level }))
+        .sort((a, b) => a.at - b.at);
+      for (const { at, level } of schedule) {
+        setTimeout(() => increaseServiceLevel(level), at - start).unref();
       }
     },
-    getServiceLevel: () => serviceLevel,
+    increaseServiceLevel,
+    /**
+     * @param {number} level
+     * @param {{ until?: Date | number }} [options]
+     */
+    async setServiceLevel(level, { until } = {}) {
+      /** @type {ManualLevel} */
+      const value = { level };
+      if (until !== undefined) {
+        value.until = new Date(until).getTime();
+      }
+      debug(`Setting the manual level to ${level}`);
+      await store.set(value);
+      manual = value;
+    },
+    async clearServiceLevel() {
+      debug('Clearing the manual level');
+      await store.set(null);
+      manual = null;
+    },
+    getServiceLevel,
   });
 }
 

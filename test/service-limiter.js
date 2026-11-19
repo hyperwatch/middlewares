@@ -1,4 +1,5 @@
 const assert = require('node:assert');
+const { setTimeout: sleep } = require('node:timers/promises');
 
 const { serviceLimiter } = require('../src');
 
@@ -79,5 +80,139 @@ describe('serviceLimiter', () => {
     const res = await get(app.url);
     assert.strictEqual(res.status, 503);
     assert.strictEqual(res.body, 'Service Limited. Try again later.');
+  });
+
+  describe('Retry-After', () => {
+    const retryAfterFor = async (identity) => {
+      const res = await get(app.url, { headers: { 'x-identity': identity } });
+      return [res.status, res.headers.get('retry-after')];
+    };
+
+    it('while warming up: until the step serving the request', async () => {
+      const limiter = await start();
+      limiter.warmUp([
+        { after: 30, level: 50 },
+        { after: 180, level: 100 },
+      ]);
+      assert.deepStrictEqual(await retryAfterFor('Googlebot'), [503, '30']);
+      assert.deepStrictEqual(await retryAfterFor('Semrush'), [503, '180']);
+    });
+
+    it('raises the level step by step', async () => {
+      const limiter = await start();
+      limiter.warmUp([
+        { after: 0.1, level: 50 },
+        { after: 0.2, level: 100 },
+      ]);
+      await sleep(150);
+      assert.strictEqual(limiter.getServiceLevel(), 50);
+      assert.strictEqual(await statusFor('Googlebot'), 200);
+      assert.deepStrictEqual(await retryAfterFor('Semrush'), [503, '1']);
+      await sleep(100);
+      assert.strictEqual(limiter.getServiceLevel(), 100);
+      assert.strictEqual(await statusFor('Semrush'), 200);
+    });
+
+    it('limited manually: no Retry-After by default', async () => {
+      const limiter = await start();
+      // SERVICE_LEVEL=40: the warm-up never serves identified robots
+      limiter.warmUp([{ after: 30, level: 40 }]);
+      assert.deepStrictEqual(await retryAfterFor('Googlebot'), [503, null]);
+    });
+
+    it('limited manually: the retryAfter option', async () => {
+      await start({ retryAfter: 3600 });
+      assert.deepStrictEqual(await retryAfterFor('Googlebot'), [503, '3600']);
+    });
+
+    it('tells a custom response whether the server is warming up', async () => {
+      const told = [];
+      const limiter = await start({
+        onLimited: (req, res, limited) => {
+          told.push(limited);
+          res.statusCode = 429;
+          res.end();
+        },
+      });
+      limiter.warmUp([{ after: 30, level: 50 }]);
+      await statusFor('Googlebot');
+      await statusFor('Semrush');
+      assert.deepStrictEqual(told, [
+        { level: 0, warmingUp: true, retryAfter: 30 },
+        { level: 0, warmingUp: false, retryAfter: undefined },
+      ]);
+    });
+  });
+
+  describe('manual level', () => {
+    it('limits below the warm-up level', async () => {
+      const limiter = await start({ initialLevel: 100 });
+      await limiter.setServiceLevel(40);
+      assert.strictEqual(limiter.getServiceLevel(), 40);
+      assert.strictEqual(await statusFor('Googlebot'), 503);
+      assert.strictEqual(await statusFor('Facebook'), 200);
+      await limiter.clearServiceLevel();
+      assert.strictEqual(await statusFor('Googlebot'), 200);
+    });
+
+    it('never cuts a warm-up short', async () => {
+      const limiter = await start();
+      await limiter.setServiceLevel(100);
+      assert.strictEqual(limiter.getServiceLevel(), 0);
+    });
+
+    it('ends at until, told as Retry-After', async () => {
+      const limiter = await start({ initialLevel: 100 });
+      await limiter.setServiceLevel(40, { until: Date.now() + 120_000 });
+      const res = await get(app.url, {
+        headers: { 'x-identity': 'Googlebot' },
+      });
+      assert.strictEqual(res.status, 503);
+      assert.strictEqual(res.headers.get('retry-after'), '120');
+      await limiter.setServiceLevel(40, { until: Date.now() - 1 });
+      assert.strictEqual(await statusFor('Googlebot'), 200);
+    });
+
+    it('is shared through the store', async () => {
+      let shared = null;
+      const store = {
+        get: async () => shared,
+        set: async (value) => {
+          shared = value;
+        },
+      };
+      const other = serviceLimiter({ initialLevel: 100, store });
+      const limiter = await start({
+        initialLevel: 100,
+        store,
+        refreshInterval: 0.05,
+      });
+      await other.setServiceLevel(40);
+      await sleep(100);
+      assert.strictEqual(limiter.getServiceLevel(), 40);
+      assert.strictEqual(await statusFor('Googlebot'), 503);
+    });
+
+    it('keeps the last level when the store fails', async () => {
+      let fail = false;
+      const store = {
+        get: async () => {
+          if (fail) {
+            throw new Error('down');
+          }
+          return { level: 40 };
+        },
+        set: async () => {},
+      };
+      const limiter = await start({
+        initialLevel: 100,
+        store,
+        refreshInterval: 0.05,
+      });
+      await sleep(100);
+      fail = true;
+      await sleep(100);
+      assert.strictEqual(limiter.getServiceLevel(), 40);
+    });
   });
 });
