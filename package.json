@@ -9,6 +9,7 @@
   },
   "main": "src/index.js",
   "files": [
+    "docs",
     "src",
     "types"
   ],
