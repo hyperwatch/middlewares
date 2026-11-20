@@ -40,43 +40,141 @@ If the first response hasn't started after `timeout` (the application hangs, or 
 
 ## Service limiter
 
-Turns identified robots away with a `503` while a server warms up (fresh caches, just deployed). The service level starts at `initialLevel` and only goes up:
+Turns verified robots away with a `503` while a server warms up (fresh caches, just deployed), the least important the longest. People are never turned away.
 
-| Level    | Served                                         |
-| -------- | ---------------------------------------------- |
-| < 50     | Unidentified requests and essential identities |
-| 50 to 99 | Everything except the non-essential identities |
-| 100      | Everything                                     |
+Each request gets a **priority**, and the limiter serves down to one of them:
 
 ```js
 const { serviceLimiter } = require('@hyperwatch/middlewares');
 
 const limiter = serviceLimiter({
-  essentialIdentities: ['Facebook', 'Pingdom', 'Twitter'],
-  nonEssentialIdentities: ['Ahrefs', 'PetalBot', 'Semrush'],
-  message: 'Service Limited. Try again later.',
+  // Most important first
+  priorities: ['high', 'normal', 'low'],
+
+  classify({ identity, category, req }) {
+    // People, and clients that aren't verified: never limited
+    if (!identity) {
+      return;
+    }
+    // Someone is waiting: link previews, uptime checks
+    if (['social-preview', 'monitoring'].includes(category)) {
+      return 'high';
+    }
+    // Usually able to wait
+    if (
+      ['seo', 'marketing', 'ai-training', 'archive', 'research'].includes(
+        category
+      )
+    ) {
+      return 'low';
+    }
+    // Everything else that is identified: other robots, and what we know nothing about
+    return 'normal';
+  },
 });
 
 app.use(limiter);
 
 server.listen(port, () => {
-  setTimeout(() => limiter.increaseServiceLevel(50), 30 * 1000);
-  setTimeout(() => limiter.increaseServiceLevel(100), 3 * 60 * 1000);
+  // From now: high only. After 30 s: normal too. After 3 min: everything.
+  limiter.warmUp([
+    { after: 30, serve: 'normal' },
+    { after: 180, serve: 'low' },
+  ]);
 });
 ```
 
-| Option                   | Default                                             | Description                       |
-| ------------------------ | --------------------------------------------------- | --------------------------------- |
-| `essentialIdentities`    | `[]`                                                | Served from level 0               |
-| `nonEssentialIdentities` | `[]`                                                | Served only at level 100          |
-| `initialLevel`           | `0`                                                 |                                   |
-| `getIdentity`            | `req.identity`, else `req.hyperwatch.getIdentity()` | `(req) => identity`, may be async |
-| `onLimited`              | a `503` with `message`                              | `(req, res) => void`              |
-| `message`                | `Service Limited. Try again later.`                 | Body of the default `503`         |
+What is written above is the default: `serviceLimiter()` alone does the same. A limited request gets a `503` with `Retry-After`, the seconds left until the step that serves its priority ([Google's crawlers read it](https://developers.google.com/search/docs/guides/reduce-crawl-rate)).
 
-The identities are [Hyperwatch](https://github.com/hyperwatch/hyperwatch) identities: a request only has one once its origin is verified. With Hyperwatch's Express input, define `req.hyperwatch.getIdentity` from the augmented log, or pass your own `getIdentity`.
+- Until `warmUp()` is called, everything is served.
+- The first priority is always served.
+- A request `classify` gives no priority to (`undefined` or `null`) is never limited.
+- `limiter.serving()` returns the lowest priority served now.
 
-The limiter object also has `getServiceLevel()`.
+The `identity` and the `category` come from [Hyperwatch](https://github.com/hyperwatch/hyperwatch): a request only has an identity once its origin is verified, and the category is the kind of robot it is in the [robots database](https://github.com/hyperwatch/database). <!-- TODO at release: the Hyperwatch version that sets `category` --> With a Hyperwatch that doesn't set `category`, every identified request is `normal`.
+
+### Your own policy
+
+`classify` is plain code: its precedence is the order of its lines.
+
+**One exception, keeping the default.** The default improves with releases, and this keeps following it:
+
+```js
+const { serviceLimiter, defaultClassify } = require('@hyperwatch/middlewares');
+
+const limiter = serviceLimiter({
+  classify(context) {
+    if (context.identity === 'PetalBot') {
+      return 'low';
+    }
+    return defaultClassify(context);
+  },
+});
+```
+
+**The whole policy.** Copy the function above and change it. Your copy no longer follows the package: a new robot in a category you list needs nothing, a new category is whatever your last line says.
+
+**Other priorities.** Give your own names, and a `classify` that returns them:
+
+```js
+serviceLimiter({
+  priorities: ['critical', 'high', 'normal', 'low'],
+  classify({ identity, category }) {
+    if (!identity) {
+      return;
+    }
+    if (category === 'monitoring') {
+      return 'critical';
+    }
+    return defaultClassify({ identity, category });
+  },
+});
+```
+
+### Options
+
+| Option       | Default                              | Description                                                                                             |
+| ------------ | ------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| `priorities` | `['high', 'normal', 'low']`          | Ordered names, most important first                                                                     |
+| `classify`   | `defaultClassify`                    | `({ identity, category, req }) => priority`, may be async                                               |
+| `skip`       | none                                 | `(req) => boolean`, synchronous, runs first: true passes the request without identifying it             |
+| `identify`   | from Hyperwatch, else `req.identity` | `(req) => ({ identity, category })`, may be async                                                       |
+| `timeout`    | `1`                                  | Seconds `identify` and `classify` get together                                                          |
+| `respond`    | a `503`, `Retry-After`, `message`    | `(req, res, limited) => void`: the response to a limited request                                        |
+| `message`    | `Service Limited. Try again later.`  | Body of the default response                                                                            |
+| `onLimited`  | none                                 | `(req, limited) => void`: told of each limited request, for logs and counts; the response is still sent |
+| `onError`    | a warning, once per kind             | `(error, { kind, req }) => void`: told when a request is served because the limiter failed              |
+
+`limited` is `{ identity, category, priority, serving, retryAfter }`.
+
+Use `skip` for routes that must answer whatever happens (health checks, webhooks): it runs before the request is identified.
+
+### `warmUp(steps)`
+
+Called once, usually when the server starts listening. From then, only the first priority is served; each step serves down to `serve` once `after` seconds have passed.
+
+- Each step must come later and serve more than the one before. Invalid steps throw and change nothing.
+- `warmUp([])` serves the first priority only, for good.
+- If the last step isn't the last priority, the rest stays limited as long as the limiter lives, without `Retry-After`. That is how a deploy caps the service.
+- A second call throws.
+
+### When the limiter itself fails
+
+A mistake in the limiter must not take requests down, so the request is served when:
+
+- `identify` or `classify` throws, rejects, or doesn't answer within `timeout` (kinds `identify`, `classify`, `timeout`);
+- `classify` returns something that isn't one of `priorities` (kind `priority`).
+
+Each case goes to `onError`. **A typo in a priority name therefore turns limiting off for those requests:** the default `onError` warns about it once per kind (`process.emitWarning`), so watch the logs when you change `classify`.
+
+Errors thrown by `skip`, `respond`, `onLimited` and `onError` are yours: they go to `next(err)`.
+
+### What it is not
+
+- **Not overload protection.** Clients without an identity always pass, and a priority is released at a set time whatever the load.
+- **Per process.** Each process counts from its own `warmUp()`. During a rolling deploy processes differ, and a retry can reach a younger one and be refused again: `Retry-After` is an estimate.
+- **Not access control.** An identity is as strong as Hyperwatch's check for it, and the category is the kind of robot the request claims to be within a verified operator.
+- **Not immediate for every robot.** The default `identify` asks Hyperwatch for a fast answer, without waiting for reverse DNS: a robot verified by its hostname passes until that lookup is cached. Robots verified by address list or by signature are identified at once.
 
 ## License
 

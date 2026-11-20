@@ -9,6 +9,14 @@ const serviceLimiter = require('./service-limiter');
  * @typedef {import('./duplicate-handler').DuplicateHandlerOptions} DuplicateHandlerOptions
  * @typedef {import('./service-limiter').ServiceLimiterOptions} ServiceLimiterOptions
  * @typedef {import('./service-limiter').ServiceLimiter} ServiceLimiter
+ * @typedef {import('./service-limiter').Robot} Robot
+ * @typedef {import('./service-limiter').ClassifyContext} ClassifyContext
+ * @typedef {import('./service-limiter').Limited} Limited
+ * @typedef {import('./service-limiter').WarmUpStep} WarmUpStep
  */
 
-module.exports = { duplicateHandler, serviceLimiter };
+module.exports = {
+  duplicateHandler,
+  serviceLimiter,
+  defaultClassify: serviceLimiter.defaultClassify,
+};

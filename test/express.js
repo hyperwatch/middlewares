@@ -10,7 +10,11 @@ describe('with Express', () => {
   before(async () => {
     calls = 0;
     const app = express();
-    app.use(serviceLimiter({ getIdentity: (req) => req.get('x-identity') }));
+    const limiter = serviceLimiter({
+      identify: (req) => ({ identity: req.get('x-identity') }),
+    });
+    limiter.warmUp([{ after: 60, serve: 'low' }]);
+    app.use(limiter);
     app.use(duplicateHandler());
     app.get('/cookie', (req, res) => {
       calls++;
